@@ -9,25 +9,66 @@ import TextAlign from "@tiptap/extension-text-align";
 import Placeholder from "@tiptap/extension-placeholder";
 import Image from "@tiptap/extension-image";
 
+/* ✅ 타입 */
 type QA = {
+  id: string;
   question: string;
+  answer: string;
+  score: number;
+  createdAt: string;
+  feedback?: number;
+  usedInAnswer: boolean;
+};
+
+type AIResponse = {
+  relevant: boolean;
+  score: number;
   answer: string;
 };
 
 export default function AssignmentPage() {
   const [input, setInput] = useState("");
-  const [currentAnswer, setCurrentAnswer] = useState("");
   const [logs, setLogs] = useState<QA[]>([]);
   const [mounted, setMounted] = useState(false);
+  const [hoverRating, setHoverRating] = useState<{ [key: string]: number }>({});
+
+  /* ✅ 추가 */
+  const [finalComment, setFinalComment] = useState("");
+  const [textColor, setTextColor] = useState("#000000");
 
   const chatRef = useRef<HTMLDivElement>(null);
   const imageInputRef = useRef<HTMLInputElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const [isLoading, setIsLoading] = useState(false);
+
+
+  /* ✅ 질문 필터 */
+  const validateQuestion = (input: string): string | null => {
+    const trimmed = input.trim();
+
+    if (!trimmed) return "질문을 입력해주세요.";
+    if (trimmed.length < 5) return "질문이 너무 짧아요.";
+    if (trimmed.length > 500) return "질문이 너무 길어요.";
+
+    const repeated = /(.)\1{4,}/;
+    if (repeated.test(trimmed)) return "의미 있는 질문을 입력해주세요.";
+
+    const onlySpecial = /^[^a-zA-Z0-9가-힣]+$/;
+    if (onlySpecial.test(trimmed)) return "질문 형식이 올바르지 않습니다.";
+
+    const bannedWords = ["몰?루", "아무거나"];
+    if (bannedWords.some(word => trimmed.includes(word))) {
+      return "의미 있는 질문을 입력해주세요.";
+    }
+
+    return null;
+  };
 
   useEffect(() => {
     setMounted(true);
   }, []);
 
+  const [, forceUpdate] = useState(0);
   const editor = useEditor({
     extensions: [
       StarterKit,
@@ -43,30 +84,168 @@ export default function AssignmentPage() {
     ],
     content: "<p></p>",
     immediatelyRender: false,
+
+    /* ✅ 추가 */
+    onUpdate: () => {
+      forceUpdate(v => v + 1);
+    },
+    onSelectionUpdate: () => {
+      forceUpdate(v => v + 1);
+    },
   });
 
   useEffect(() => {
     chatRef.current?.scrollTo(0, chatRef.current.scrollHeight);
-  }, [logs, currentAnswer]);
+  }, [logs]);
 
-  const handleSend = () => {
-    if (!input.trim()) return;
+  /* ✅ 질문 전송 */
+  const handleSend = async () => {
+    const error = validateQuestion(input);
+    if (error) {
+      alert(error);
+      return;
+    }
 
-    const fakeAnswer = `AI 응답: ${input}에 대한 설명입니다.\n여러 줄도 가능합니다.`;
+    setIsLoading(true); // 로딩상태
 
-    setCurrentAnswer(fakeAnswer);
-    setLogs((prev) => [...prev, { question: input, answer: fakeAnswer }]);
-    setInput("");
+    try {
+      const res = await fetch("http://localhost:8080/api/chat", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          question: input,
+          assignment:
+            "List, Set, Map의 차이를 설명하고 각각의 사용 예시를 작성하시오.",
+        }),
+      });
+
+      const data: AIResponse = await res.json();
+
+      setLogs((prev) => [
+        ...prev,
+        {
+          id: crypto.randomUUID(),
+          question: input,
+          answer: data.answer,
+          score: data.score,
+          createdAt: new Date().toISOString(),
+          usedInAnswer: false,
+        },
+      ]);
+
+      setInput("");
+    } catch (e) {
+      setLogs((prev) => [
+        ...prev,
+        {
+          id: crypto.randomUUID(),
+          question: input,
+          answer: "AI 요청 실패",
+          score: 0,
+          createdAt: new Date().toISOString(),
+          usedInAnswer: false,
+        },
+      ]);
+    } finally {
+      setIsLoading(false);
+    }
   };
 
+  /* ✅ AI 활용 분석 */
+  const getPlainText = (html: string) => {
+    const div = document.createElement("div");
+    div.innerHTML = html;
+    return div.innerText;
+  };
+
+  const similarity = (a: string, b: string) => {
+    const aWords = a.split(/\s+/);
+    const bWords = b.split(/\s+/);
+
+    const common = aWords.filter(word => bWords.includes(word)).length;
+    return common / Math.max(aWords.length, 1);
+  };
+
+  const analyzeAIUsage = () => {
+    if (!editor) return 0;
+
+    const answerText = getPlainText(editor.getHTML());
+    if (!answerText.trim()) return 0;
+
+    let copiedScore = 0;
+    let referencedScore = 0;
+    let totalSimilarity = 0;
+
+    logs.forEach(log => {
+      const sim = similarity(answerText, log.answer);
+      totalSimilarity += sim;
+
+      // 🔥 핵심: 유사도 기반으로만 판단
+      if (sim > 0.8) {
+        copiedScore += 1;
+      } else if (sim > 0.3) {
+        referencedScore += 1;
+      }
+
+      // 🔥 버튼으로 넣었어도 "완전 복붙일 때만" 추가 패널티
+      if (log.usedInAnswer && sim > 0.7) {
+        copiedScore += 0.5; // 기존 1.5 → 완화
+      }
+    });
+
+    const total = logs.length || 1;
+
+    const copiedRate = copiedScore / total;
+    const refRate = referencedScore / total;
+    const avgSim = totalSimilarity / total;
+
+    const isOwnWriting = avgSim < 0.3;
+
+    let score =
+      (1 - copiedRate) * 50 +
+      refRate * 30 +
+      (answerText.length > 50 ? 10 : 0);
+
+    if (isOwnWriting) {
+      score += 20;
+    }
+
+    return Math.max(0, Math.min(100, Math.round(score)));
+  };
+
+  const aiScore = analyzeAIUsage();
+
+  const getAIScoreLabel = () => {
+    if (aiScore >= 80) return "좋음";
+    if (aiScore >= 40) return "보통";
+    return "부족";
+  };
+
+  const getAIScoreColor = () => {
+    if (aiScore >= 80) return "text-green-600";
+    if (aiScore >= 40) return "text-yellow-600";
+    return "text-red-600";
+  };
+
+
+  /* ✅ 제출 */
   const handleSubmit = () => {
     const finalAnswer = editor?.getHTML();
-    console.log({ logs, finalAnswer });
-    alert("제출 완료");
+    console.log({ logs, finalAnswer, aiScore, finalComment });
+    alert(`제출 완료\nAI 활용 점수: ${aiScore}`);
   };
 
-  const insertToEditor = (text: string) => {
+  /* ✅ 답안 삽입 */
+  const insertToEditor = (id: string, text: string) => {
     editor?.chain().focus().insertContent(`<p>${text}</p>`).run();
+
+    setLogs((prev) =>
+      prev.map((l) =>
+        l.id === id ? { ...l, usedInAnswer: true } : l
+      )
+    );
   };
 
   const handleImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -92,7 +271,16 @@ export default function AssignmentPage() {
       .run();
   };
 
-  const btn = "px-2 py-1 bg-gray-100 rounded hover:bg-gray-200";
+  /* ✅ 버튼 스타일 (활성화 포함) */
+  const btn = (active?: boolean) =>
+    `px-2 py-1 rounded text-sm transition-all ${active ? "bg-blue-500 text-white" : "bg-gray-100 hover:bg-gray-200"
+    }`;
+
+  const getScoreColor = (score: number) => {
+    if (score >= 80) return "text-green-600";
+    if (score >= 40) return "text-yellow-600";
+    return "text-red-600";
+  };
 
   return (
     <div className="h-[calc(100vh-4rem)] bg-gradient-to-br from-slate-50 to-slate-200 p-6 text-gray-800">
@@ -119,42 +307,87 @@ export default function AssignmentPage() {
                 </p>
               </div>
 
-              {/* 에디터 */}
               <div className="flex flex-col min-h-0">
                 <h2 className="text-sm font-semibold mb-2">답안 작성</h2>
 
-                {/* 툴바 */}
+                {/* ✅ 수정된 에디터 툴바 */}
                 <div className="flex flex-wrap gap-2 mb-2 border-b pb-2 text-sm">
-                  <button className={btn} onClick={() => editor?.chain().focus().toggleBold().run()}>B</button>
-                  <button className={btn} onClick={() => editor?.chain().focus().toggleItalic().run()}>I</button>
-                  <button className={btn} onClick={() => editor?.chain().focus().toggleStrike().run()}>S</button>
 
-                  <button className={btn} onClick={() => editor?.chain().focus().toggleHeading({ level: 1 }).run()}>H1</button>
-                  <button className={btn} onClick={() => editor?.chain().focus().toggleHeading({ level: 2 }).run()}>H2</button>
+                  <button
+                    className={btn(editor?.isActive("bold"))}
+                    onClick={() => {
+                      editor?.chain().focus().toggleBold().run();
+                      forceUpdate(v => v + 1);
+                    }}
+                  >
+                    B
+                  </button>
 
-                  <button className={btn} onClick={() => editor?.chain().focus().toggleBulletList().run()}>•</button>
-                  <button className={btn} onClick={() => editor?.chain().focus().toggleOrderedList().run()}>1.</button>
+                  <button
+                    className={btn(editor?.isActive("italic"))}
+                    onClick={() => {
+                      editor?.chain().focus().toggleItalic().run();
+                      forceUpdate(v => v + 1);
+                    }}
+                  >
+                    I
+                  </button>
 
-                  <button className={btn} onClick={() => editor?.chain().focus().setTextAlign("left").run()}>좌</button>
-                  <button className={btn} onClick={() => editor?.chain().focus().setTextAlign("center").run()}>중</button>
-                  <button className={btn} onClick={() => editor?.chain().focus().setTextAlign("right").run()}>우</button>
+                  <button
+                    className={btn(editor?.isActive("strike"))}
+                    onClick={() => {
+                      editor?.chain().focus().toggleStrike().run();
+                      forceUpdate(v => v + 1);
+                    }}
+                  >
+                    S
+                  </button>
 
-                  <button className={btn} onClick={() => editor?.chain().focus().toggleBlockquote().run()}>❝</button>
-                  <button className={btn} onClick={() => editor?.chain().focus().toggleCodeBlock().run()}>{"</>"}</button>
+                  <button className={btn(editor?.isActive("heading", { level: 1 }))} onClick={() => editor?.chain().focus().toggleHeading({ level: 1 }).run()}>H1</button>
+                  <button className={btn(editor?.isActive("heading", { level: 2 }))} onClick={() => editor?.chain().focus().toggleHeading({ level: 2 }).run()}>H2</button>
 
-                  <input type="color" onChange={(e) => editor?.chain().focus().setColor(e.target.value).run()} />
+                  <button className={btn(editor?.isActive("bulletList"))} onClick={() => editor?.chain().focus().toggleBulletList().run()}>•</button>
+                  <button className={btn(editor?.isActive("orderedList"))} onClick={() => editor?.chain().focus().toggleOrderedList().run()}>1.</button>
+
+                  <button className={btn(editor?.isActive({ textAlign: "left" }))} onClick={() => editor?.chain().focus().setTextAlign("left").run()}>⯇</button>
+                  <button className={btn(editor?.isActive({ textAlign: "center" }))} onClick={() => editor?.chain().focus().setTextAlign("center").run()}>≡</button>
+                  <button className={btn(editor?.isActive({ textAlign: "right" }))} onClick={() => editor?.chain().focus().setTextAlign("right").run()}>⯈</button>
+
+                  {/* ✅ 컬러 피커 */}
+                  <input
+                    type="color"
+                    value={textColor}
+                    onChange={(e) => {
+                      setTextColor(e.target.value);
+                      editor?.chain().focus().setColor(e.target.value).run();
+                    }}
+                    className="w-8 h-8 border rounded cursor-pointer"
+                  />
+
                 </div>
 
-                {/* 에디터 */}
                 {mounted && editor && (
-                  <div className="flex-1 overflow-y-auto border rounded-xl p-3 bg-gray-50 focus-within:ring-2 focus-within:ring-blue-200">
+                  <div className="flex-1 overflow-y-auto border rounded-xl p-3 bg-gray-50">
                     <EditorContent editor={editor} />
                   </div>
                 )}
               </div>
             </div>
 
-            {/* 하단 버튼 */}
+            {/* AI 분석 UI */}
+            <div className="mt-4 border-t pt-4 space-y-2">
+              <div className="text-sm font-semibold">AI 활용 분석</div>
+              <div className={`text-sm font-bold ${getAIScoreColor()}`}>
+                점수: {aiScore}점 ({getAIScoreLabel()})
+              </div>
+              <input
+                value={finalComment}
+                onChange={(e) => setFinalComment(e.target.value)}
+                placeholder="AI 활용 방법 한줄 작성..."
+                className="w-full border rounded px-2 py-1 text-sm"
+              />
+            </div>
+
             <div className="pt-4 mt-3 border-t flex justify-between items-center">
 
               <div className="flex gap-2">
@@ -169,13 +402,9 @@ export default function AssignmentPage() {
                 <input type="file" ref={fileInputRef} onChange={handleFileUpload} className="hidden" />
               </div>
 
-              <div className="flex gap-2">
-                <button className="bg-gray-100 px-4 py-2 rounded-lg text-sm">임시 저장</button>
-                <button onClick={handleSubmit} className="bg-blue-600 text-white px-4 py-2 rounded-lg text-sm">
-                  제출
-                </button>
-              </div>
-
+              <button onClick={handleSubmit} className="bg-blue-600 text-white px-4 py-2 rounded-lg text-sm">
+                제출
+              </button>
             </div>
           </section>
         </div>
@@ -187,46 +416,105 @@ export default function AssignmentPage() {
             <h2 className="text-sm font-semibold mb-3">AI 채팅</h2>
 
             <div ref={chatRef} className="flex-1 overflow-y-auto space-y-4">
-              {logs.map((log, i) => (
-                <div key={i} className="space-y-2">
-                  <div className="flex justify-end">
-                    <div className="bg-blue-500 text-white px-3 py-2 rounded-2xl text-sm max-w-[75%]">
-                      {log.question}
-                    </div>
+
+              {logs.map((log) => (
+                <div key={log.id} className="bg-gray-50 p-4 rounded-xl space-y-2">
+
+                  <div className="text-sm font-semibold text-blue-600">
+                    Q. {log.question}
                   </div>
 
-                  <div className="flex justify-start">
-                    <div className="bg-gray-100 px-3 py-2 rounded-2xl text-sm whitespace-pre-wrap">
-                      {log.answer}
-                    </div>
+                  <div className="text-sm whitespace-pre-wrap">
+                    A. {log.answer}
                   </div>
 
-                  <button onClick={() => insertToEditor(log.answer)} className="text-xs text-blue-500">
-                    답안에 추가
-                  </button>
+                  <div className="flex justify-between items-center pt-2">
+
+                    <div className={`text-xs font-semibold ${getScoreColor(log.score)}`}>
+                      질문점수: {log.score}
+                    </div>
+
+                    <button
+                      onClick={() => insertToEditor(log.id, log.answer)}
+                      className="text-xs bg-blue-100 text-blue-600 px-2 py-1 rounded hover:bg-blue-200"
+                    >
+                      답안에 추가
+                    </button>
+
+                  </div>
+
+                  <div className="text-xs text-gray-400">
+                    {log.usedInAnswer ? "✔ 답안에 사용됨" : "미사용"}
+                  </div>
+
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs font-semibold text-gray-600">
+                      답변평가:
+                    </span>
+
+                    <div className="flex gap-1">
+                      {[1, 2, 3, 4, 5].map((n) => {
+                        const hover = hoverRating[log.id] || 0;
+                        const current = hover || log.feedback || 0;
+
+                        return (
+                          <button
+                            key={n}
+                            onMouseEnter={() =>
+                              setHoverRating(prev => ({ ...prev, [log.id]: n }))
+                            }
+                            onMouseLeave={() =>
+                              setHoverRating(prev => ({ ...prev, [log.id]: 0 }))
+                            }
+                            onClick={() => {
+                              setLogs(prev =>
+                                prev.map(l =>
+                                  l.id === log.id ? { ...l, feedback: n } : l
+                                )
+                              );
+                            }}
+                            className={`text-lg transition-all duration-150 ${n <= current
+                              ? "text-yellow-400 scale-110"
+                              : "text-gray-300"
+                              } hover:scale-125`}
+                          >
+                            ★
+                          </button>
+                        );
+                      })}
+                    </div>
+
+                  </div>
+
                 </div>
               ))}
-
-              {currentAnswer && (
-                <div className="space-y-2">
-                  <div className="bg-yellow-50 p-3 rounded-xl text-sm">
-                    {currentAnswer}
-                  </div>
-                  <button onClick={() => insertToEditor(currentAnswer)} className="text-xs text-blue-500">
-                    답안에 추가
-                  </button>
+              {isLoading && (
+                <div className="bg-blue-50 p-3 rounded-xl text-sm text-blue-600 animate-pulse">
+                  AI가 답변 생성 중...
                 </div>
               )}
+
             </div>
 
             <div className="flex gap-2 mt-4">
               <input
                 value={input}
                 onChange={(e) => setInput(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    e.preventDefault();
+                    handleSend();
+                  }
+                }}
                 className="flex-1 bg-gray-100 border rounded-lg px-3 py-2 text-sm"
               />
-              <button onClick={handleSend} className="bg-blue-600 text-white px-4 rounded-lg text-sm">
-                질문
+              <button
+                onClick={handleSend}
+                disabled={isLoading}
+                className={`px-4 rounded-lg text-sm text-white ${isLoading ? "bg-gray-400" : "bg-blue-600"
+                  }`}
+              >
+                {isLoading ? "답변중..." : "질문"}
               </button>
             </div>
 
